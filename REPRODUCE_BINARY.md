@@ -88,3 +88,19 @@ python vis.py --dataset binary --data_path /data/binary_images --split val \
 - 本适配用二分类 VAR 从头训练类别条件层，沿用官方预训练 VQ-VAE；不支持把 1000 类 VAR 权重直接改标签加载。
 - 对比实验请固定数据划分、VQ-VAE 权重、训练检查点、随机种子及评估参数。上游训练默认 `seed=None`；需要固定时传 `--seed=<整数>`。评估默认 `--seed=0`。
 - 当前工作副本没有签出 `VAR` 子模块，也没有数据和权重；因此只能做静态代码验收，完整训练 / GPU 验证需要在服务器准备上述文件后执行。
+
+## 7. 独立推理与二分类指标
+
+新增的 `infer_binary.py` 默认读取 `test` 划分。该划分应与训练数据共用父目录，并包含 `test/benign/` 和 `test/mal/` 两个有图片的目录：
+
+```bash
+python infer_binary.py \
+  --data_path /data/binary_images --split test \
+  --model_ckpt VAR/local_output/ar-ckpt-best.pth \
+  --vae_ckpt vae_ch160v4096z32.pth \
+  --depth 16 --batch_size 1
+```
+
+推理流程与 `eval.py` 的默认单阶段设置相同：VQ-VAE 编码、完整 10 个尺度、每个类别一次 VAR 前向、按 token 对数似然求和，取两类分数的较大者为预测结果。`mal=1` 为正类；用于 ROC AUC 与 PR AUC 的连续分数为 `log p(x|mal) - log p(x|benign)`，决策阈值为 0。`--batch_size` 与原评估脚本一样表示模型单次前向的最大 batch 量。
+
+脚本打印 ACC、PR AUC、ROC AUC、ACSA、GM、RECALL、F1-score，以及固定顺序 `[benign, mal]` 的混淆矩阵和分类报告。ACSA 是 `(mal 召回率 + benign 召回率)/2`，即二分类的[平衡准确率](https://scikit-learn.org/stable/modules/model_evaluation.html#balanced-accuracy-score)；GM 是两类召回率乘积的平方根，即二分类 [G-mean](https://imbalanced-learn.org/stable/references/generated/imblearn.metrics.geometric_mean_score.html)；RECALL 和 F1-score 针对 `mal`。PR AUC 是 PR 曲线的**梯形积分面积**，与 average precision（AP）的阶梯积分定义不同。所有数值指标输出范围均为 0–1。若以后使用 `zero_test` 等划分名，修改 `--split` 即可。

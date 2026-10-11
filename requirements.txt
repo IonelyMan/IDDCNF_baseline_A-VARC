@@ -12,3 +12,4 @@ pytz==2025.2
 tensorboard==2.20.0
 matplotlib==3.10.0
 opencv-python-headless==4.10.0.84
+scikit-learn==1.5.2
