@@ -6,7 +6,7 @@
 
 本项目的 `eval.py` 使用 VQ-VAE 把图片变成多尺度 token，再对每个候选类别计算 VAR 的条件对数似然，选择分数最高的类别。本适配保留这套分类计算。二分类候选类别固定为 `benign=0` 和 `mal=1`，没有恶意软件家族标签，也不使用 ImageNet synset 子集。
 
-原 A-VARC 仓库没有独立的二分类训练脚本；其训练依赖 `VAR` 子模块。`train_binary.py` 只把上游训练脚本的 ImageNet 数据构建器替换为两类目录读取器。模型、损失、优化器、学习率调度、分布式采样、验证、检查点和自动续训仍由上游 `VAR/train.py` 完成。原论文的 A-VARC+ 还包含 CCA 微调，但此仓库没有 CCA 训练实现；这里复现的是 VAR 条件似然分类 baseline，不能把结果标成 A-VARC+。[论文](https://arxiv.org/html/2510.12060)、[上游 VAR 训练说明](https://github.com/FoundationVision/VAR#training-scripts)。
+原 A-VARC 仓库没有独立的二分类训练脚本；其训练依赖 `VAR` 子模块。`train_binary.py` 把上游训练脚本的 ImageNet 数据构建器替换为两类目录读取器，并修复上游在梯度累积步记录空梯度范数时的崩溃。未执行优化器更新的步以 `0` 作为梯度范数日志占位值；反向传播、梯度累积、优化器更新、学习率调度、分布式采样、验证、检查点和自动续训仍由上游实现。原论文的 A-VARC+ 还包含 CCA 微调，但此仓库没有 CCA 训练实现；这里复现的是 VAR 条件似然分类 baseline，不能把结果标成 A-VARC+。[论文](https://arxiv.org/html/2510.12060)、[上游 VAR 训练说明](https://github.com/FoundationVision/VAR#training-scripts)。
 
 ## 2. 准备代码和 Python 环境
 
@@ -45,16 +45,17 @@ python -c 'import torch; print(torch.__version__, torch.version.cuda, torch.cuda
 在仓库根目录运行。下面的 d16、256×256、全局 batch 768、200 epochs、FP16、`alng=1e-3`、`wpe=0.1` 与 [上游 VAR d16 训练命令](https://github.com/FoundationVision/VAR#training-scripts)一致：
 
 ```bash
+mkdir -p logs
 nohup setsid \
   torchrun --standalone --nproc_per_node=1 train_binary.py \
   --data_path=/home/linux/7T/lzw/datasets/IDDCNF_datasets/imb_android \
   --train_split=train --val_split=val \
-  --depth=16 --bs=768 --ac=16 --ep=200  --fp16=1 --alng=1e-3 --wpe=0.1 > logs/train.log 2>&1 &
+  --depth=16 --bs=768 --ac=96 --ep=200 --fp16=1 --alng=1e-3 --wpe=0.1 > logs/train.log 2>&1 &
 ```
 
 上游其他默认值继续生效：AdamW、基础学习率 `1e-4`（按 batch 缩放）、权重衰减 `0.05`、梯度裁剪 `2`、标签平滑 `0`、默认不水平翻转、约 `1.125×` 缩放后训练随机裁剪和验证中心裁剪、像素映射到 `[-1,1]`。上游默认每 10 个 epoch 和最后一个 epoch 验证并保存检查点；目录为 `VAR/local_output/`，包括 `ar-ckpt-last.pth` 与 `ar-ckpt-best.pth`。重复同一命令会按上游逻辑自动续训。其他上游参数仍可直接传给 `train_binary.py`。
 
-上游命令按 8 GPU 设计。如果服务器 GPU 较少，可通过上游 `--ac` 做梯度累积，例如 1 GPU 使用 `--bs=768 --ac=8` 时单次前向 batch 约为 96、有效 batch 约为 768。若显存不足，继续增大 `--ac`。这是资源调整，不是论文报告的 8 GPU 配置；建议记录实际 GPU 数和 `--ac`。
+上游命令按 8 GPU 设计。`--nproc_per_node` 必须与当前训练环境可见且互不重复的 GPU 数一致。单卡示例使用 `--bs=768 --ac=96`，单次前向 batch 为 8、累积后的有效 batch 为 768；若显存不足，可增大 `--ac`，同时确保 `768 / --ac` 为正整数。这是资源调整，不是论文报告的 8 GPU 配置；建议记录实际 GPU 数和 `--ac`。本项目入口已处理梯度累积时上游 `grad_norm=None` 的日志崩溃，因此单卡训练不需要改回 `--ac=1`。
 
 ## 5. 验证或评估任意有标签划分
 

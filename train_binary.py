@@ -1,8 +1,8 @@
-"""Run the unmodified VAR trainer with two-class folder datasets.
+"""Run the upstream VAR trainer with two-class folder datasets.
 
-Pass VAR's normal training arguments through this entry point. Only the dataset
-builder is replaced, so optimization, logging, checkpoints and resume remain
-the upstream implementation.
+Pass VAR's normal training arguments through this entry point. The dataset
+builder is replaced, and a logging-only fix handles gradient accumulation.
+Optimization, checkpoints and resume remain the upstream implementation.
 """
 
 import argparse
@@ -11,6 +11,29 @@ import sys
 from pathlib import Path
 
 from datasets import build_binary_training_datasets
+
+
+def fix_gradient_accumulation_logging():
+    """Give upstream trainer.py a scalar to log before the first optimizer step.
+
+    AmpOptimizer returns ``None`` for the gradient norm on accumulation steps,
+    while VARTrainer.train_step unconditionally calls ``grad_norm.item()`` when
+    logging. A zero placeholder avoids that crash without changing gradients or
+    the optimizer step. The actual norm is returned on optimizer steps.
+    """
+    from utils.amp_sc import AmpOptimizer
+
+    original_backward_clip_step = AmpOptimizer.backward_clip_step
+
+    def backward_clip_step(self, stepping, loss):
+        grad_norm, scale_log2 = original_backward_clip_step(
+            self, stepping=stepping, loss=loss,
+        )
+        if grad_norm is None:
+            grad_norm = loss.detach().new_zeros(())
+        return grad_norm, scale_log2
+
+    AmpOptimizer.backward_clip_step = backward_clip_step
 
 
 def main():
@@ -35,6 +58,7 @@ def main():
         )
 
     var_data.build_dataset = binary_dataset
+    fix_gradient_accumulation_logging()
     sys.argv = [str(train_script), *upstream_args]
     runpy.run_path(str(train_script), run_name='__main__')
 
