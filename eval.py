@@ -44,8 +44,6 @@ def make_json_serializable(obj):
         return obj
 
 
-MODEL_DEPTH = 16  # TODO: =====> please specify MODEL_DEPTH <=====
-assert MODEL_DEPTH in {16, 20, 24, 30}
 BASE_LOG_DIR = "./outputs"
 
 def compute_log_likelihood(logits, gt_tokens, vae, args, **kwargs):
@@ -72,13 +70,19 @@ def main():
     parser = argparse.ArgumentParser()
 
     # dataset args
-    parser.add_argument("--dataset", type=str, default="imagenet", choices=["imagenet", "imagenet-a", "imagenetv2", "imagenet-r", "imagenet-sketch", "objectnet"], help="Dataset to use")
+    parser.add_argument("--dataset", type=str, default="imagenet", choices=["binary", "imagenet", "imagenet-a", "imagenetv2", "imagenet-r", "imagenet-sketch", "objectnet"], help="Dataset to use")
+    parser.add_argument("--data_path", type=str, default="./datasets", help="Dataset root; binary data has split/benign and split/mal beneath it")
+    parser.add_argument("--split", type=str, default="val", help="Binary dataset split to evaluate (e.g. val or zero_test)")
     parser.add_argument("--depth", type=int, default=16)
     parser.add_argument("--batch_size", "-b", type=int, default=1)
+    parser.add_argument("--num_workers", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--output_dir", type=str, default=BASE_LOG_DIR)
     parser.add_argument("--num_candidate_list", type=str, default="1", help="Comma-separated list of candidates surviving each stage (e.g., '10,3,1'). Must be decreasing with last value = 1.")
     parser.add_argument("--num_sample_list", type=str, default="1", help="Comma-separated list of samples for each stage (e.g., '1,1,3'). Each value >= 1.")
     parser.add_argument("--num_scale_list", type=str, default="10", help="Comma-separated list of scales for each stage (e.g., '6,10,10'). Each value in [1, len(patch_nums)].")
-    parser.add_argument("--model_ckpt", type=str, default="./weights/imagenet/var_d16.pth", help="Path to VAR model checkpoint")
+    parser.add_argument("--model_ckpt", type=str, default=None, help="Path to VAR model checkpoint; required for binary data")
+    parser.add_argument("--vae_ckpt", type=str, default="vae_ch160v4096z32.pth", help="Path to pretrained VQ-VAE weights")
     parser.add_argument("--save_json", action='store_true', help="Save detailed JSON results for each sample")
     parser.add_argument("--sigma", type=float, default=0.1, help="Variance of the Gaussian noise added to the neighbors")
     parser.add_argument("--synset_subset_path", type=str, default=None, help="Path to synset subset file (e.g., subsets/imagenet100.txt)")
@@ -86,7 +90,8 @@ def main():
     parser.add_argument("--extra", type=str, default="formal", help="Suffix after classification")
     parser.add_argument("--top_k_list", type=str, default="1,3,5,10,20,25,50,100", help="Comma-separated list of k values for top-k accuracy (e.g., '1,3,5,10')")
     args = parser.parse_args()
-    MODEL_DEPTH = args.depth
+    if args.dataset == "binary" and args.model_ckpt is None:
+        parser.error("--model_ckpt is required for --dataset binary")
 
     # Parse and validate list arguments
     def parse_int_list(list_str, arg_name):
@@ -148,12 +153,11 @@ def main():
 
     if max(num_sample_list) > 1:
         name += f"_sigma{args.sigma}"
-    dataset_name = args.dataset
+    dataset_name = f"binary_{args.split}" if args.dataset == "binary" else args.dataset
     if args.synset_subset_path:
         subset_name = os.path.basename(args.synset_subset_path).replace('.txt', '')
         dataset_name += f"_{subset_name}"
-    if args.extra:
-        LOG_DIR = BASE_LOG_DIR + f"_{args.extra}"
+    LOG_DIR = args.output_dir + f"_{args.extra}" if args.extra else args.output_dir
 
     # Hardcoded score_func to "log_likelihood"
     score_func = "log_likelihood"
@@ -207,25 +211,27 @@ def main():
         os.makedirs(json_folder, exist_ok=True)
 
     # Build dataset
-    data_path = f"./datasets"
     dataset_val = build_dataset(
-        data_path=data_path,
+        data_path=args.data_path,
         final_reso=256 if args.depth != 36 else 512,
         dataset_type=args.dataset,
         synset_subset_path=args.synset_subset_path,
-        sample_per_class=args.sample_per_class
+        sample_per_class=args.sample_per_class,
+        split=args.split,
     )
     
     # Extract information from dataset attributes
     num_classes = dataset_val.num_classes
     class_indices = dataset_val.subset_indices  # Use subset_indices which contains filtered indices or falls back to class_indices
+    if any(k > len(class_indices) for k in num_candidate_list[:-1]):
+        raise ValueError(f"Candidate count cannot exceed {len(class_indices)} dataset classes")
 
     # Adjust batch size to prevent OOM when testing many classes
     adjusted_batch_size = max(args.batch_size // len(class_indices), 1)
 
     # Create DataLoader
     total_samples_needed = len(dataset_val)
-    ld_val = DataLoader(dataset_val, num_workers=0, pin_memory=True, batch_size=adjusted_batch_size, shuffle=False, drop_last=False)
+    ld_val = DataLoader(dataset_val, num_workers=args.num_workers, pin_memory=True, batch_size=adjusted_batch_size, shuffle=False, drop_last=False)
     logging.info(f"Testing on whole dataset: {total_samples_needed} samples across {len(class_indices)} classes")
     logging.info(f"Adjusted batch size from {args.batch_size} to {adjusted_batch_size} to prevent OOM with {len(class_indices)} classes")
     
@@ -241,20 +247,27 @@ def main():
     logging.info(f"Building VAE and VAR-d{args.depth} model")
     vae, var_model = build_vae_var(
         V=V, Cvae=32, ch=160, share_quant_resi=4,
-        device=device, patch_nums=patch_nums, num_classes=1000, depth=args.depth, shared_aln=args.depth == 36
+        device=device, patch_nums=patch_nums, num_classes=2 if args.dataset == "binary" else 1000,
+        depth=args.depth, shared_aln=args.depth == 36
     )
 
     # Use model checkpoint from args
     model_ckpt = args.model_ckpt
+    if model_ckpt is None:
+        model_ckpt = f"./weights/imagenet/var_d{args.depth}.pth"
     logging.info(f"Using model checkpoint: {model_ckpt}")
 
     # download checkpoint
     hf_home = "https://huggingface.co/FoundationVision/var/resolve/main"
-    vae_ckpt = "vae_ch160v4096z32.pth"
-    if not osp.exists(vae_ckpt):
+    vae_ckpt = args.vae_ckpt
+    if args.dataset != "binary" and vae_ckpt == "vae_ch160v4096z32.pth" and not osp.exists(vae_ckpt):
         os.system(f"wget {hf_home}/{vae_ckpt}")
-    if not osp.exists(model_ckpt):
+    if args.dataset != "binary" and not osp.exists(model_ckpt):
         os.system(f"wget {hf_home}/{osp.basename(model_ckpt)}")
+    if not osp.isfile(vae_ckpt):
+        raise FileNotFoundError(f"VQ-VAE checkpoint not found: {vae_ckpt}")
+    if not osp.isfile(model_ckpt):
+        raise FileNotFoundError(f"VAR checkpoint not found: {model_ckpt}")
 
     # load checkpoints
     vae.load_state_dict(torch.load(vae_ckpt, map_location="cpu"), strict=True)
@@ -294,7 +307,7 @@ def main():
 
     ############################# 2. Sample with classifier-free guidance
 
-    seed = 0
+    seed = args.seed
     torch.manual_seed(seed)
     num_sampling_steps = 250
     more_smooth = False

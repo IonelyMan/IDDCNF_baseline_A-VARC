@@ -10,7 +10,6 @@ from torchvision import datasets
 from torchvision.datasets.folder import DatasetFolder, IMG_EXTENSIONS
 from torchvision.transforms import InterpolationMode, transforms
 from PIL import Image
-from imagenetv2_pytorch import ImageNetV2Dataset
 
 
 def normalize_01_into_pm1(x):
@@ -282,15 +281,60 @@ class ImageNet(datasets.ImageFolder):
         self.dataset_type = "imagenet"
 
 
-class ImageNetV2(ImageNetV2Dataset):
+class ImageNetV2(Dataset):
     """ImageNet-V2 matched-frequency variant"""
     
     def __init__(self, root, transform=None):
-        super().__init__(variant="matched-frequency", location=root, transform=transform)
+        from imagenetv2_pytorch import ImageNetV2Dataset
+
+        self.dataset = ImageNetV2Dataset(variant="matched-frequency", location=root, transform=transform)
+        self.fnames = self.dataset.fnames
         self.fnames.sort()
         self.num_classes = 1000
         self.class_indices = list(range(1000))  # 0-999
         self.dataset_type = "imagenetv2"
+
+    def __len__(self):
+        return len(self.fnames)
+
+    def __getitem__(self, index):
+        return self.dataset[index]
+
+
+class BinaryFolder(datasets.ImageFolder):
+    """Two-class folder dataset with stable benign=0, mal=1 labels."""
+
+    def __init__(self, data_path, split, transform=None):
+        root = osp.join(data_path, split)
+        if not osp.isdir(root):
+            raise FileNotFoundError(f"Dataset split does not exist: {root}")
+        super().__init__(root=root, transform=transform)
+        if self.classes != ['benign', 'mal']:
+            raise ValueError(f"Expected benign/ and mal/ in {root}; found {self.classes}")
+        self.num_classes = 2
+        self.class_indices = [0, 1]
+        self.dataset_type = "binary"
+
+
+def build_binary_training_datasets(data_path, train_split='train', val_split='val',
+                                   final_reso=256, hflip=False, mid_reso=1.125):
+    """Use the upstream VAR training and validation transforms for two classes."""
+    mid_reso = round(mid_reso * final_reso)
+    train_aug = [
+        transforms.Resize(mid_reso, interpolation=InterpolationMode.LANCZOS),
+        transforms.RandomCrop((final_reso, final_reso)),
+        transforms.ToTensor(), normalize_01_into_pm1,
+    ]
+    if hflip:
+        train_aug.insert(0, transforms.RandomHorizontalFlip())
+    val_aug = [
+        transforms.Resize(mid_reso, interpolation=InterpolationMode.LANCZOS),
+        transforms.CenterCrop((final_reso, final_reso)),
+        transforms.ToTensor(), normalize_01_into_pm1,
+    ]
+    train_set = BinaryFolder(data_path, train_split, transforms.Compose(train_aug))
+    val_set = BinaryFolder(data_path, val_split, transforms.Compose(val_aug))
+    return 2, train_set, val_set
 
 
 class ImageNetA(Dataset):
@@ -393,22 +437,23 @@ class ImageNetSketch(Dataset):
 
 
 def build_dataset(data_path, final_reso, dataset_type,
-                  synset_subset_path=None, sample_per_class=None):
+                  synset_subset_path=None, sample_per_class=None, split='val'):
     """
     Build dataset with unified interface.
     
     Args:
-        data_path: Root path to datasets
+        data_path: Root path to datasets (split parent for binary)
         final_reso: Final image resolution
-        dataset_type: One of "imagenet", "imagenetv2", "imagenet-a", "imagenet-r", 
-                     "imagenet-sketch", "objectnet"
+        dataset_type: One of "binary", "imagenet", "imagenetv2", "imagenet-a",
+                     "imagenet-r", "imagenet-sketch", "objectnet"
         synset_subset_path: Path to synset subset file (optional)
         sample_per_class: Number of samples per class (optional)
+        split: Folder split name for binary datasets
     
     Returns:
         dataset: Dataset with standardized attributes:
             - num_classes: Number of classes
-            - class_indices: Original ImageNet indices
+            - class_indices: Class indices used by the model
             - subset_indices: Filtered indices (if synset_subset_path used)
             - dataset_type: Dataset type string
     """
@@ -424,7 +469,11 @@ def build_dataset(data_path, final_reso, dataset_type,
     ])
     
     # Create dataset based on type
-    if dataset_type == "imagenet":
+    if dataset_type == "binary":
+        if synset_subset_path is not None:
+            raise ValueError("--synset_subset_path is only for ImageNet datasets")
+        dataset = BinaryFolder(data_path, split, transform=transform)
+    elif dataset_type == "imagenet":
         dataset = ImageNet(root=data_path, transform=transform)
     elif dataset_type == "imagenetv2":
         dataset = ImageNetV2(root=data_path, transform=transform)

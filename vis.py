@@ -293,10 +293,10 @@ def extract_conditional_likelihoods(log_likelihood_tensor, per_token_log_probs_d
     Extract logp(x), logp(x|y), logp(x|y_neg) for each image in batch.
 
     Args:
-        log_likelihood_tensor: (batch_size, num_candidates) - summed likelihoods (includes class 1000)
+        log_likelihood_tensor: (batch_size, num_candidates) - summed likelihoods (includes unconditional class)
         per_token_log_probs_dict: dict mapping candidate_idx -> (batch_size, seq_length)
         label_batch: (batch_size,) - true labels
-        candidates_per_image: list of candidate classes including 1000
+        candidates_per_image: list of candidate classes including the unconditional class
 
     Returns:
         results: list of dicts with per-image conditional likelihoods and per-token probs
@@ -307,7 +307,7 @@ def extract_conditional_likelihoods(log_likelihood_tensor, per_token_log_probs_d
     for i in range(current_batch_size):
         true_label = label_batch[i].item()
 
-        # Extract unconditional likelihood (class 1000 is at the end)
+        # Extract unconditional likelihood (last candidate)
         logp_x = log_likelihood_tensor[i, -1]
         unconditional_candidate_idx = len(candidates_per_image) - 1
         per_token_logp_x = per_token_log_probs_dict[unconditional_candidate_idx][i]
@@ -321,10 +321,10 @@ def extract_conditional_likelihoods(log_likelihood_tensor, per_token_log_probs_d
             logging.warning(f"True label {true_label} not in candidates for image {i}")
             continue
 
-        # Find best wrong class (exclude true label and unconditional class 1000)
+        # Find best wrong class (exclude true label and unconditional class)
         valid_mask = torch.ones(len(candidates_per_image), dtype=torch.bool)
         valid_mask[true_label_idx] = False
-        valid_mask[-1] = False  # Exclude unconditional class 1000
+        valid_mask[-1] = False  # Exclude unconditional class
 
         if valid_mask.sum() == 0:
             logging.warning(f"No valid wrong candidates for image {i}")
@@ -357,16 +357,24 @@ BASE_LOG_DIR = "./outputs"
 def main():
     parser = argparse.ArgumentParser(description="Visual explainability for VAR classification")
 
-    parser.add_argument("--dataset", type=str, default="imagenet", choices=["imagenet", "imagenet-a", "imagenetv2", "imagenet-r", "imagenet-sketch", "objectnet"], help="Dataset to use")
+    parser.add_argument("--dataset", type=str, default="imagenet", choices=["binary", "imagenet", "imagenet-a", "imagenetv2", "imagenet-r", "imagenet-sketch", "objectnet"], help="Dataset to use")
+    parser.add_argument("--data_path", type=str, default="./datasets", help="Dataset root")
+    parser.add_argument("--split", type=str, default="val", help="Binary dataset split to visualize")
     parser.add_argument("--depth", type=int, default=16)
     parser.add_argument("--batch_size", "-b", type=int, default=1)
-    parser.add_argument("--model_ckpt", type=str, default="./weights/imagenet/var_d16.pth", help="Path to VAR model checkpoint")
+    parser.add_argument("--num_workers", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--output_dir", type=str, default=BASE_LOG_DIR)
+    parser.add_argument("--model_ckpt", type=str, default=None, help="Path to VAR model checkpoint; required for binary data")
+    parser.add_argument("--vae_ckpt", type=str, default="vae_ch160v4096z32.pth", help="Path to pretrained VQ-VAE weights")
     parser.add_argument("--save_json", action='store_true', help="Save detailed JSON results for each sample")
     parser.add_argument("--synset_subset_path", type=str, default=None, help="Path to synset subset file (e.g., subsets/imagenet100.txt)")
     parser.add_argument("--sample_per_class", type=int, default=None, help="Maximum number of samples per class (ensures balanced sampling)")
     parser.add_argument("--extra", type=str, default="vis", help="Suffix after classification")
     parser.add_argument("--top_k_list", type=str, default="1,3,5,10,20,25,50,100", help="Comma-separated list of k values for top-k accuracy")
     args = parser.parse_args()
+    if args.dataset == "binary" and args.model_ckpt is None:
+        parser.error("--model_ckpt is required for --dataset binary")
 
     # Parse k_list
     try:
@@ -389,12 +397,11 @@ def main():
     name = "var"
     if args.depth != 16:
         name += f"_d{args.depth}"
-    dataset_name = args.dataset
+    dataset_name = f"binary_{args.split}" if args.dataset == "binary" else args.dataset
     if args.synset_subset_path:
         subset_name = os.path.basename(args.synset_subset_path).replace('.txt', '')
         dataset_name += f"_{subset_name}"
-    if args.extra:
-        LOG_DIR = BASE_LOG_DIR + f"_{args.extra}"
+    LOG_DIR = args.output_dir + f"_{args.extra}" if args.extra else args.output_dir
 
     score_func = "log_likelihood"
     run_folder = osp.join(LOG_DIR, dataset_name, score_func, name)
@@ -428,29 +435,28 @@ def main():
         os.makedirs(json_folder, exist_ok=True)
 
     # Load class names for visualization labels
-    class_names = load_imagenet_class_names()
-    logging.info(f"Loaded {len(class_names)} class names for visualization")
-
     # Build dataset
-    data_path = "./datasets"
     dataset_val = build_dataset(
-        data_path=data_path,
+        data_path=args.data_path,
         final_reso=256 if args.depth != 36 else 512,
         dataset_type=args.dataset,
         synset_subset_path=args.synset_subset_path,
-        sample_per_class=args.sample_per_class
+        sample_per_class=args.sample_per_class,
+        split=args.split,
     )
+    class_names = {idx: name for name, idx in dataset_val.class_to_idx.items()} if args.dataset == "binary" else load_imagenet_class_names()
+    logging.info(f"Loaded {len(class_names)} class names for visualization")
 
     num_classes = dataset_val.num_classes
     class_indices = dataset_val.subset_indices
 
-    # Adjust batch size: candidates include all classes + class 1000
-    num_candidates = len(class_indices) + 1  # +1 for unconditional class 1000
+    # Adjust batch size: candidates include all classes + unconditional class
+    num_candidates = len(class_indices) + 1
     adjusted_batch_size = max(args.batch_size // num_candidates, 1)
 
     # Create DataLoader
     total_samples_needed = len(dataset_val)
-    ld_val = DataLoader(dataset_val, num_workers=0, pin_memory=True, batch_size=adjusted_batch_size, shuffle=False, drop_last=False)
+    ld_val = DataLoader(dataset_val, num_workers=args.num_workers, pin_memory=True, batch_size=adjusted_batch_size, shuffle=False, drop_last=False)
     logging.info(f"Testing on whole dataset: {total_samples_needed} samples across {len(class_indices)} classes")
     logging.info(f"Adjusted batch size from {args.batch_size} to {adjusted_batch_size} to prevent OOM with {num_candidates} candidates (including unconditional)")
 
@@ -460,20 +466,27 @@ def main():
     logging.info(f"Building VAE and VAR-d{args.depth} model")
     vae, var_model = build_vae_var(
         V=V, Cvae=32, ch=160, share_quant_resi=4,
-        device=device, patch_nums=patch_nums, num_classes=1000, depth=args.depth, shared_aln=args.depth == 36
+        device=device, patch_nums=patch_nums, num_classes=2 if args.dataset == "binary" else 1000,
+        depth=args.depth, shared_aln=args.depth == 36
     )
 
     # Use model checkpoint from args
     model_ckpt = args.model_ckpt
+    if model_ckpt is None:
+        model_ckpt = f"./weights/imagenet/var_d{args.depth}.pth"
     logging.info(f"Using model checkpoint: {model_ckpt}")
 
     # Download checkpoint if needed
     hf_home = "https://huggingface.co/FoundationVision/var/resolve/main"
-    vae_ckpt = "vae_ch160v4096z32.pth"
-    if not osp.exists(vae_ckpt):
+    vae_ckpt = args.vae_ckpt
+    if args.dataset != "binary" and vae_ckpt == "vae_ch160v4096z32.pth" and not osp.exists(vae_ckpt):
         os.system(f"wget {hf_home}/{vae_ckpt}")
-    if not osp.exists(model_ckpt):
+    if args.dataset != "binary" and not osp.exists(model_ckpt):
         os.system(f"wget {hf_home}/{osp.basename(model_ckpt)}")
+    if not osp.isfile(vae_ckpt):
+        raise FileNotFoundError(f"VQ-VAE checkpoint not found: {vae_ckpt}")
+    if not osp.isfile(model_ckpt):
+        raise FileNotFoundError(f"VAR checkpoint not found: {model_ckpt}")
 
     # Load checkpoints
     vae.load_state_dict(torch.load(vae_ckpt, map_location="cpu"), strict=True)
@@ -508,7 +521,7 @@ def main():
 
     ############################# Classification with Visualization
 
-    seed = 0
+    seed = args.seed
     torch.manual_seed(seed)
     random.seed(seed)
     np.random.seed(seed)
@@ -527,8 +540,8 @@ def main():
     # Scale weights for heatmap aggregation
     scale_weights = [(pn / patch_nums[-1])**2 for pn in patch_nums]
 
-    # Candidates: all classes + unconditional class 1000
-    candidates_per_image = class_indices + [1000]
+    # Candidates: all classes + the model's unconditional class
+    candidates_per_image = class_indices + [2 if args.dataset == "binary" else 1000]
 
     start_time = time.time()
     logging.info("Starting classification with visualization...")
@@ -589,11 +602,11 @@ def main():
                 log_likelihood = gt_log_probs.sum(dim=-1)
                 batch_log_likelihood_list.append(log_likelihood)
 
-            # Assemble full log-likelihood tensor (includes class 1000)
+            # Assemble full log-likelihood tensor (includes unconditional class)
             all_log_likelihoods = torch.cat(batch_log_likelihood_list, dim=0)
             log_likelihood_tensor_with_1000 = all_log_likelihoods.reshape(current_batch_size, num_candidates_this_stage)
 
-            # Remove class 1000 for prediction
+            # Remove unconditional class for prediction
             log_likelihood_tensor = log_likelihood_tensor_with_1000[:, :-1]
 
             # Predictions
@@ -603,7 +616,7 @@ def main():
             batch_time = time.time() - batch_start_time
 
         # Top-k accuracy
-        candidates_for_pred = current_candidates[:, :-1]  # Exclude class 1000
+        candidates_for_pred = current_candidates[:, :-1]  # Exclude unconditional class
         if not correct_dict:
             max_candidates = candidates_for_pred.shape[1]
             valid_k_list = [k for k in k_list if k <= max_candidates]

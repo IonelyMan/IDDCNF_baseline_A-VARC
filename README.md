@@ -1,6 +1,8 @@
 # A-VARC
 [ICLR 2026] Your VAR Model is Secretly an Efficient and Explainable Generative Classifier
 
+For the `train/benign`, `train/mal`, `val/benign`, `val/mal` binary baseline on Linux/Python 3.10/CUDA 12.4, see [REPRODUCE_BINARY.md](REPRODUCE_BINARY.md). It uses `train_binary.py` and `--dataset binary`; the ImageNet examples below remain upstream examples.
+
 ![Banner](assets/banner.jpg)
 
 <a href="https://openreview.net/pdf?id=zFF0WRMjlp"><img src="https://img.shields.io/badge/OpenReview-Paper-A42C25.svg" alt="OpenReview"></a>
