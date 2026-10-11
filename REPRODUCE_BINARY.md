@@ -46,10 +46,10 @@ python -c 'import torch; print(torch.__version__, torch.version.cuda, torch.cuda
 
 ```bash
 nohup setsid \
-  torchrun --standalone --nproc_per_node=8 train_binary.py \
-  --data_path=/data/binary_images \
+  torchrun --standalone --nproc_per_node=1 train_binary.py \
+  --data_path=/home/linux/7T/lzw/datasets/IDDCNF_datasets/imb_android \
   --train_split=train --val_split=val \
-  --depth=16 --bs=768 --ep=200 --fp16=1 --alng=1e-3 --wpe=0.1 > 
+  --depth=16 --bs=768 --ac=16 --ep=200  --fp16=1 --alng=1e-3 --wpe=0.1 > logs/train.log 2>&1 &
 ```
 
 上游其他默认值继续生效：AdamW、基础学习率 `1e-4`（按 batch 缩放）、权重衰减 `0.05`、梯度裁剪 `2`、标签平滑 `0`、默认不水平翻转、约 `1.125×` 缩放后训练随机裁剪和验证中心裁剪、像素映射到 `[-1,1]`。上游默认每 10 个 epoch 和最后一个 epoch 验证并保存检查点；目录为 `VAR/local_output/`，包括 `ar-ckpt-last.pth` 与 `ar-ckpt-best.pth`。重复同一命令会按上游逻辑自动续训。其他上游参数仍可直接传给 `train_binary.py`。

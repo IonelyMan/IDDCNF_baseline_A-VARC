@@ -1,2 +1,5 @@
 .venv/
 *.pth
+*.log
+logs/
+*.pyc
