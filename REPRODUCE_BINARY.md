@@ -96,7 +96,7 @@ python vis.py --dataset binary --data_path /data/binary_images --split val \
 
 ```bash
 python infer_binary.py \
-  --data_path /data/binary_images --split test \
+  --data_path /home/linux/7T/lzw/datasets/IDDCNF_datasets/imb_android --split test \
   --model_ckpt VAR/local_output/ar-ckpt-best.pth \
   --vae_ckpt vae_ch160v4096z32.pth \
   --depth 16 --batch_size 1
