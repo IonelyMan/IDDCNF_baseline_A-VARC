@@ -10,28 +10,19 @@
 
 ## 2. 运行
 
-在 Linux/Python 3.10 环境中，先按 [REPRODUCE_BINARY.md](REPRODUCE_BINARY.md) 安装依赖并签出 `VAR` 子模块。`requirements.txt` 已增加 SciPy。准备训练后的**二分类** VAR checkpoint、对应 VQ-VAE 权重和 `val/benign`、`val/mal` 图片目录。推荐所有 baseline 使用同一份公共 CSV 清单：
-
-```csv
-sample_id,label
-val/benign/example_a.png,0
-val/mal/example_b.png,1
-```
-
-`sample_id` 可以是数据根目录相对路径（如上），也可省略 `val/` 前缀；须唯一且能精确映射到当前 split。CSV 行顺序即导出行顺序。缺失、重复、同一图片使用两个别名、标签冲突均报错。有清单时不抽样或截断。
+在 Linux/Python 3.10 环境中，先按 [REPRODUCE_BINARY.md](REPRODUCE_BINARY.md) 安装依赖并签出 `VAR` 子模块。`requirements.txt` 已增加 SciPy。准备训练后的**二分类** VAR checkpoint、对应 VQ-VAE 权重和 `val/benign`、`val/mal` 图片目录。**默认对指定 split 的全部图片计算和绘图**，无需提供样本清单，也不会默认随机抽样。完整样本 ID 和标签仍自动写入输出的 `sample_manifest.csv`，供核查。
 
 ```bash
 python visualize_alignment_uniformity.py \
   --checkpoint VAR/local_output/ar-ckpt-best.pth \
   --vae_ckpt vae_ch160v4096z32.pth \
   --data_path /data/binary_images --split val --depth 16 \
-  --sample_manifest /data/common_au_samples.csv \
   --batch_size 1 --device cuda \
   --output_dir results/au/var_d16_best_val \
   --align_alpha 2 --uniform_t 2
 ```
 
-若尚无公共清单，可先在固定的 `val` split 上无放回抽取最多 1024 张图片并保存清单；请把生成的 `sample_manifest.csv` 作为其他 baseline 的共同输入。默认不按类别重采样。
+`--sample_manifest` 和 `--max_samples` 只用于**明确要做子集诊断**的额外实验。前者读取 `sample_id,label` CSV 并严格匹配；ID 可为数据根目录相对路径（如 `val/benign/example.png`），也可省略 split 前缀。后者配合 `--seed` 无放回抽样，不按类别重采样。两者均不影响上面的全样本默认命令。若跨 baseline 的目录结构或图片数量不同，可比较各报告自动导出的清单；只有决定使用共同子集时才需要将一份清单作为输入。
 
 ```bash
 python visualize_alignment_uniformity.py \
@@ -39,7 +30,7 @@ python visualize_alignment_uniformity.py \
   --vae_ckpt vae_ch160v4096z32.pth \
   --data_path /data/binary_images --split val --depth 16 \
   --max_samples 1024 --seed 42 --batch_size 1 \
-  --output_dir results/au/var_d16_best_val
+  --output_dir results/au/var_d16_best_val_subset
 ```
 
 仅重绘已导出的全部缓存行，不加载 PyTorch 或 GPU，也不再次抽样：
@@ -51,7 +42,7 @@ python visualize_alignment_uniformity.py \
   --align_alpha 2 --uniform_t 2
 ```
 
-`--batch_size` 是图片数；每批对两类分别执行一次 VAR 前向，显存不足时用 1。`--device` 可设 `auto`、`cpu` 或 `cuda`；CPU 可运行，但加载和执行大型 VAR 会很慢。不同 checkpoint、split、层定义及参数应使用独立输出目录。公共清单若很大，成对指标的计算和直方图需要约 `O(N²D)` 时间；先确定可承受的共同诊断子集。
+`--batch_size` 是图片数；每批对两类分别执行一次 VAR 前向，显存不足时用 1。`--device` 可设 `auto`、`cpu` 或 `cuda`；CPU 可运行，但加载和执行大型 VAR 会很慢。不同 checkpoint、split、层定义及参数应使用独立输出目录。全样本成对指标仍需约 `O(N²D)` 时间；实现按块遍历所有无序 pair，避免一次保存 `N²` 距离数组，不会因数据量大而静默截断。特征矩阵和 SVD 仍需内存；若全量计算超出机器资源，请明确以子集实验报告，不要将子集图标成全量图。
 
 ## 3. 输出和计算定义
 
@@ -66,7 +57,7 @@ python visualize_alignment_uniformity.py \
 | `sample_manifest.csv` | 实际使用的 ID 和标签 |
 | `metadata.json` | 模型与来源、split、抽样种子、特征定义、预处理和绘图参数 |
 
-高维指标在导出的特征行归一化后计算，使用 `float64`。Alignment 是同标签不同样本的距离 `alpha` 次方，先对每个有效 anchor 的同类伙伴平均，再对 anchor 平均；默认 `alpha=2`。Uniformity 是全部无序不同样本对（同类和异类均包括）的 `log mean exp(-t × squared_distance)`，默认 `t=2`；负值正常。少于两个样本的类别其 Alignment 为 `null`，没有有效 anchor 时总 Alignment 为 `null`；少于两个样本时 Uniformity 为 `null`。零向量被计数并提示，不从高维指标中删除。
+高维指标在导出的特征行归一化后计算，使用 `float64`。Alignment 是同标签不同样本的距离 `alpha` 次方，先对每个有效 anchor 的同类伙伴平均，再对 anchor 平均；默认 `alpha=2`。Uniformity 是全部无序不同样本对（同类和异类均包括）的 `log mean exp(-t × squared_distance)`，默认 `t=2`；负值正常。分块计算用 `logaddexp` 合并各块，结果仍覆盖整份 split。少于两个样本的类别其 Alignment 为 `null`，没有有效 anchor 时总 Alignment 为 `null`；少于两个样本时 Uniformity 为 `null`。零向量被计数并提示，不从高维指标中删除。
 
 左图显示原高维归一化特征的同类/异类 L2 距离直方图。蓝色虚线是**同类 pair 的普通 L2 均值**，并非 Alignment。右侧圆图与角度图仅供显示：对全体样本求一次非中心化二维 SVD；所有类别共用这个基。投影范数接近零的样本只从圆图和角度图排除，仍参加高维指标。圆图用固定带宽 0.10 的 Gaussian KDE；角度图用 `κ=8` 的周期 von Mises KDE。每个分组独立归一化显示，自动色阶不用于比较绝对密度或样本量。不同模型各自拟合的二维基没有相同坐标语义。
 

@@ -10,7 +10,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
-from scipy.spatial.distance import pdist
+from scipy.spatial.distance import cdist
 from scipy.special import logsumexp
 
 
@@ -34,14 +34,15 @@ def validate_features(features, labels, sample_ids):
 
 
 def normalized_features(features):
-    z = np.asarray(features, dtype=np.float64)
+    z = np.array(features, dtype=np.float64, copy=True)
     norms = np.linalg.norm(z, axis=1)
-    return z / np.maximum(norms[:, None], 1e-12), int(np.count_nonzero(norms <= 1e-12))
+    z /= np.maximum(norms[:, None], 1e-12)
+    return z, int(np.count_nonzero(norms <= 1e-12))
 
 
-def compute_metrics(features, labels, align_alpha=2.0, uniform_t=2.0):
-    if align_alpha <= 0 or uniform_t <= 0:
-        raise ValueError('align_alpha and uniform_t must be positive')
+def compute_metrics(features, labels, align_alpha=2.0, uniform_t=2.0, pair_block_size=256):
+    if align_alpha <= 0 or uniform_t <= 0 or pair_block_size < 1:
+        raise ValueError('align_alpha, uniform_t and pair_block_size must be positive')
     z = np.asarray(features)
     y = np.asarray(labels)
     if z.ndim != 2 or z.shape[0] != len(y) or z.shape[1] == 0 or not np.isfinite(z).all():
@@ -49,46 +50,85 @@ def compute_metrics(features, labels, align_alpha=2.0, uniform_t=2.0):
     if not np.issubdtype(y.dtype, np.integer) or not np.isin(y, [0, 1]).all():
         raise ValueError('labels must be integer 0 or 1')
     u, zero_count = normalized_features(z)
-    distances = pdist(u, metric='euclidean')
-    sq_distances = pdist(u, metric='sqeuclidean')
-    row, col = np.triu_indices(len(y), k=1)
-    same = y[row] == y[col]
+    bins = np.linspace(0, 2, 31)
+    same_hist = np.zeros(len(bins) - 1, dtype=np.int64)
+    different_hist = np.zeros(len(bins) - 1, dtype=np.int64)
+    class_power_sums = np.zeros(2, dtype=np.float64)
+    class_pair_counts = np.zeros(2, dtype=np.int64)
+    same_distance_sum = 0.0
+    same_pair_count = 0
+    different_pair_count = 0
+    pair_log_sum = -np.inf
+    n_total = len(y)
+    # Visit every unordered pair exactly once. Only one pair block is resident.
+    for first in range(0, n_total, pair_block_size):
+        first_end = min(first + pair_block_size, n_total)
+        first_labels = y[first:first_end]
+        for second in range(first, n_total, pair_block_size):
+            second_end = min(second + pair_block_size, n_total)
+            second_labels = y[second:second_end]
+            sq_matrix = cdist(u[first:first_end], u[second:second_end], metric='sqeuclidean')
+            if first == second:
+                row, col = np.triu_indices(len(first_labels), k=1)
+                squared = sq_matrix[row, col]
+                left_labels, right_labels = first_labels[row], second_labels[col]
+            else:
+                squared = sq_matrix.ravel()
+                left_labels = np.repeat(first_labels, len(second_labels))
+                right_labels = np.tile(second_labels, len(first_labels))
+            if not len(squared):
+                continue
+            distances = np.sqrt(np.maximum(squared, 0.0))
+            pair_log_sum = np.logaddexp(pair_log_sum, logsumexp(-uniform_t * squared))
+            same = left_labels == right_labels
+            same_distances = distances[same]
+            different_distances = distances[~same]
+            same_pair_count += len(same_distances)
+            different_pair_count += len(different_distances)
+            same_distance_sum += float(np.sum(same_distances))
+            # Clipping only counters floating error at the mathematical L2 limit 2.
+            same_hist += np.histogram(np.minimum(same_distances, 2.0), bins=bins)[0]
+            different_hist += np.histogram(np.minimum(different_distances, 2.0), bins=bins)[0]
+            for label in (0, 1):
+                class_distances = distances[same & (left_labels == label)]
+                class_pair_counts[label] += len(class_distances)
+                class_power_sums[label] += float(np.sum(class_distances ** align_alpha))
     class_alignments = []
     valid_anchors = 0
     weighted_alignment = 0.0
     for label in (0, 1):
         n = int(np.count_nonzero(y == label))
-        mask = same & (y[row] == label)
-        value = float(np.mean(distances[mask] ** align_alpha)) if n >= 2 else None
+        value = float(class_power_sums[label] / class_pair_counts[label]) if n >= 2 else None
         class_alignments.append(value)
         if value is not None:
             weighted_alignment += n * value
             valid_anchors += n
     alignment = weighted_alignment / valid_anchors if valid_anchors else None
-    uniformity = float(logsumexp(-uniform_t * sq_distances) - math.log(len(sq_distances))) if len(sq_distances) else None
+    pair_count = same_pair_count + different_pair_count
+    uniformity = float(pair_log_sum - math.log(pair_count)) if pair_count else None
     return {
         'alignment': alignment,
         'uniformity': uniformity,
         'exp_uniformity': math.exp(uniformity) if uniformity is not None else None,
         'benign_alignment': class_alignments[0],
         'malicious_alignment': class_alignments[1],
-        'same_class_pair_mean_l2': float(np.mean(distances[same])) if np.any(same) else None,
+        'same_class_pair_mean_l2': same_distance_sum / same_pair_count if same_pair_count else None,
         'sample_count': int(len(y)),
         'benign_count': int(np.count_nonzero(y == 0)),
         'malicious_count': int(np.count_nonzero(y == 1)),
-        'pair_count': int(len(distances)),
-        'same_class_pair_count': int(np.count_nonzero(same)),
-        'different_class_pair_count': int(np.count_nonzero(~same)),
+        'pair_count': pair_count,
+        'same_class_pair_count': same_pair_count,
+        'different_class_pair_count': different_pair_count,
         'valid_alignment_anchor_count': valid_anchors,
         'zero_vector_count': zero_count,
-    }, u, distances, same
+    }, u, same_hist, different_hist
 
 
 def project_circle(u, labels):
     if min(u.shape) < 2:
         raise ValueError('seven-panel projection requires N,D >= 2')
-    # The Gram eigendecomposition gives the same uncentered right singular vectors
-    # as an SVD, while avoiding a very large full SVD for wide VAR representations.
+    # Eigenvectors of the smaller uncentered Gram/covariance matrix give the
+    # exact SVD display subspace without storing a full left singular matrix.
     if u.shape[1] > u.shape[0]:
         gram = u @ u.T
         eigenvalues, left = np.linalg.eigh(gram)
@@ -107,8 +147,9 @@ def project_circle(u, labels):
                 candidate -= basis[:, :j] @ (basis[:, :j].T @ candidate)
                 basis[:, j] = candidate / np.linalg.norm(candidate)
     else:
-        _, _, vt = np.linalg.svd(u, full_matrices=False)
-        basis = vt[:2].T.copy()
+        covariance = u.T @ u
+        eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+        basis = eigenvectors[:, np.argsort(eigenvalues)[::-1][:2]].copy()
     for j in range(2):
         pivot = np.argmax(np.abs(basis[:, j]))
         if basis[pivot, j] < 0:
@@ -141,16 +182,19 @@ def _angle_density(angles, grid, kappa=8.0, chunk_size=256):
     return result / (len(angles) * 2 * math.pi * np.i0(kappa))
 
 
-def draw_figure(output_dir, metrics, distances, same, circle, valid, labels, model_name, representation, dimension):
+def draw_figure(output_dir, metrics, same_hist, different_hist, circle, valid, labels, model_name, representation, dimension):
     fig = plt.figure(figsize=(15, 5), constrained_layout=True)
     grid_spec = fig.add_gridspec(2, 4, height_ratios=[3, 1], width_ratios=[1.3, 1, 1, 1])
     ax_dist = fig.add_subplot(grid_spec[:, 0])
     bins = np.linspace(0, 2, 31)
-    if np.any(same):
-        ax_dist.hist(distances[same], bins=bins, density=True, alpha=0.45, color='#2678ad', label='Same class')
+    width = bins[1] - bins[0]
+    if metrics['same_class_pair_count']:
+        ax_dist.bar(bins[:-1], same_hist / (same_hist.sum() * width), width=width, align='edge',
+                    alpha=0.45, color='#2678ad', label='Same class')
         ax_dist.axvline(metrics['same_class_pair_mean_l2'], color='#2678ad', ls='--', label='Same-class pair mean')
-    if np.any(~same):
-        ax_dist.hist(distances[~same], bins=bins, density=True, alpha=0.45, color='#dd8452', label='Different class')
+    if metrics['different_class_pair_count']:
+        ax_dist.bar(bins[:-1], different_hist / (different_hist.sum() * width), width=width, align='edge',
+                    alpha=0.45, color='#dd8452', label='Different class')
     ax_dist.set(xlim=(0, 2), xlabel='Original-space L2 distance', ylabel='Pair density', title='Alignment: pair distances')
     ax_dist.legend(fontsize=8)
 
@@ -201,7 +245,7 @@ def draw_figure(output_dir, metrics, distances, same, circle, valid, labels, mod
 
 def write_report(output_dir, features, labels, sample_ids, metadata, align_alpha=2.0, uniform_t=2.0):
     z, y, ids = validate_features(features, labels, sample_ids)
-    metrics, u, distances, same = compute_metrics(z, y, align_alpha, uniform_t)
+    metrics, u, same_hist, different_hist = compute_metrics(z, y, align_alpha, uniform_t)
     basis, circle, valid, projection_counts = project_circle(u, y)
     metrics.update(projection_counts)
     output_dir = Path(output_dir)
@@ -223,6 +267,6 @@ def write_report(output_dir, features, labels, sample_ids, metadata, align_alpha
                      'projection': 'shared uncentered SVD basis for display only; independent per report',
                      'circle_bandwidth': 0.10, 'angle_kappa': 8.0, 'figure_dpi': 180})
     (output_dir / 'metadata.json').write_text(json.dumps(metadata, indent=2, ensure_ascii=False, allow_nan=False), encoding='utf-8')
-    draw_figure(output_dir, metrics, distances, same, circle, valid, y,
+    draw_figure(output_dir, metrics, same_hist, different_hist, circle, valid, y,
                 metadata.get('model', 'Unknown model'), metadata.get('representation', 'unknown'), z.shape[1])
     return metrics

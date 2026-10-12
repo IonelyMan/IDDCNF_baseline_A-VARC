@@ -32,12 +32,12 @@ def _read_manifest(path):
 
 def _select_samples(dataset, data_path, split, manifest, max_samples, seed):
     root = Path(data_path).resolve()
-    lookup = {}
-    for index, (path, label) in enumerate(dataset.samples):
-        relative = Path(path).resolve().relative_to(root).as_posix()
-        lookup[relative] = (index, label)
-        lookup[relative.removeprefix(f'{split}/')] = (index, label)
     if manifest:
+        lookup = {}
+        for index, (path, label) in enumerate(dataset.samples):
+            relative = Path(path).resolve().relative_to(root).as_posix()
+            lookup[relative] = (index, label)
+            lookup[relative.removeprefix(f'{split}/')] = (index, label)
         selected = []
         for sample_id, expected_label in _read_manifest(manifest):
             key = sample_id.replace('\\', '/')
@@ -50,10 +50,13 @@ def _select_samples(dataset, data_path, split, manifest, max_samples, seed):
         if len({index for index, _, _ in selected}) != len(selected):
             raise ValueError('manifest maps multiple IDs to the same dataset sample')
         return selected
-    if max_samples < 1:
-        raise ValueError('--max_samples must be >= 1')
-    rng = np.random.default_rng(seed)
-    indices = rng.choice(len(dataset), size=min(max_samples, len(dataset)), replace=False)
+    if max_samples is None:
+        indices = range(len(dataset))
+    else:
+        if max_samples < 1:
+            raise ValueError('--max_samples must be >= 1')
+        rng = np.random.default_rng(seed)
+        indices = rng.choice(len(dataset), size=min(max_samples, len(dataset)), replace=False)
     return [(int(i), Path(dataset.samples[int(i)][0]).resolve().relative_to(root).as_posix(),
              int(dataset.samples[int(i)][1])) for i in indices]
 
@@ -92,7 +95,8 @@ def _extract(args):
     loader = DataLoader(Subset(dataset, [i for i, _, _ in selected]), batch_size=args.batch_size,
                         shuffle=False, drop_last=False, num_workers=args.num_workers,
                         pin_memory=device.type == 'cuda')
-    rows = []
+    features = None
+    cursor = 0
     seen_labels = []
     # Hook the input of the real token-prediction Linear head, after the model's
     # own conditioning/normalization. One hook call must occur per class forward.
@@ -123,14 +127,17 @@ def _extract(args):
                     if len(captures) != 1 or captures[0].shape[0] != len(images):
                         raise RuntimeError('VAR head hook did not capture exactly one vector per sample and class')
                     batch_representations.append(captures.pop())
-                rows.append(np.concatenate(batch_representations, axis=1))
+                batch_features = np.concatenate(batch_representations, axis=1)
+                if features is None:
+                    features = np.empty((len(selected), batch_features.shape[1]), dtype=batch_features.dtype)
+                features[cursor:cursor + len(images)] = batch_features
+                cursor += len(images)
                 seen_labels.extend(labels.tolist())
     finally:
         hook.remove()
-    features = np.concatenate(rows, axis=0)
     labels = np.asarray(seen_labels, dtype=np.int64)
     expected = np.asarray([label for _, _, label in selected], dtype=np.int64)
-    if len(features) != len(selected) or not np.array_equal(labels, expected):
+    if cursor != len(selected) or not np.array_equal(labels, expected):
         raise RuntimeError('extracted feature rows do not match selected sample IDs and labels')
     if not np.isfinite(features).all():
         raise RuntimeError('non-finite VAR head representation')
@@ -146,9 +153,10 @@ def _extract(args):
         'split': args.split,
         'data_path': str(Path(args.data_path).resolve()),
         'source_manifest': str(Path(args.sample_manifest).resolve()) if args.sample_manifest else None,
+        'selection': 'manifest' if args.sample_manifest else 'all_split_samples' if args.max_samples is None else 'random_sample',
         'training_seed': None,
-        'sampling_seed': None if args.sample_manifest else args.seed,
-        'max_samples': None if args.sample_manifest else args.max_samples,
+        'sampling_seed': args.seed if args.sample_manifest is None and args.max_samples is not None else None,
+        'max_samples': args.max_samples if args.sample_manifest is None else None,
         'preprocessing': f'build_dataset(binary): Resize({round(1.125 * final_reso)}, LANCZOS), CenterCrop({final_reso}), ToTensor, map [0,1] to [-1,1]',
         'device': str(device),
     }
@@ -163,7 +171,7 @@ def main():
     parser.add_argument('--data_path', help='Parent directory of split/benign and split/mal')
     parser.add_argument('--split', default='val')
     parser.add_argument('--sample_manifest', help='CSV with sample_id,label; exact selection and order')
-    parser.add_argument('--max_samples', type=int, default=1024)
+    parser.add_argument('--max_samples', type=int, help='Optional random sample cap; default is every image in the split')
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--output_dir', required=True)
     parser.add_argument('--vae_ckpt', default='vae_ch160v4096z32.pth')

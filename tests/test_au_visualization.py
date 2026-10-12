@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 
 from au_visualization import compute_metrics, project_circle, validate_features, write_report
+from visualize_alignment_uniformity import _select_samples
 
 
 class AlignmentUniformityTests(unittest.TestCase):
@@ -106,6 +107,37 @@ class AlignmentUniformityTests(unittest.TestCase):
         np.testing.assert_allclose(basis.T @ basis, np.eye(2), atol=1e-12)
         np.testing.assert_allclose((u @ basis) @ (u @ basis).T,
                                    (u @ vt[:2].T) @ (u @ vt[:2].T).T, atol=1e-12)
+
+    def test_pair_blocks_cover_every_sample_pair(self):
+        rng = np.random.default_rng(11)
+        z = rng.normal(size=(11, 6))
+        y = np.array([0, 1, 0, 1, 1, 0, 0, 1, 0, 1, 0])
+        small, _, same_small, different_small = compute_metrics(z, y, pair_block_size=3)
+        large, _, same_large, different_large = compute_metrics(z, y, pair_block_size=99)
+        self.assertEqual(small['pair_count'], 55)
+        self.assertEqual(int(same_small.sum() + different_small.sum()), 55)
+        np.testing.assert_array_equal(same_small, same_large)
+        np.testing.assert_array_equal(different_small, different_large)
+        self.assertAlmostEqual(small['alignment'], large['alignment'])
+        self.assertAlmostEqual(small['uniformity'], large['uniformity'])
+
+    def test_default_selection_is_complete_split(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = [(str(root / 'val' / 'benign' / f'{i}.png'), 0) for i in range(3)]
+            paths += [(str(root / 'val' / 'mal' / f'{i}.png'), 1) for i in range(2)]
+
+            class FakeDataset:
+                samples = paths
+
+                def __len__(self):
+                    return len(self.samples)
+
+            full = _select_samples(FakeDataset(), root, 'val', None, None, 42)
+            self.assertEqual([index for index, _, _ in full], list(range(5)))
+            self.assertEqual(len({sample_id for _, sample_id, _ in full}), 5)
+            sampled = _select_samples(FakeDataset(), root, 'val', None, 2, 42)
+            self.assertEqual(len(sampled), 2)
 
 
 if __name__ == '__main__':
