@@ -3,6 +3,8 @@
 
 For the `train/benign`, `train/mal`, `val/benign`, `val/mal` binary baseline on Linux/Python 3.10/CUDA 12.4, see [REPRODUCE_BINARY.md](REPRODUCE_BINARY.md). It uses `train_binary.py` and `--dataset binary`; the ImageNet examples below remain upstream examples.
 
+For the binary baseline's alignment/uniformity seven-panel diagnostic, see [RQS_EXP.md](RQS_EXP.md).
+
 ![Banner](assets/banner.jpg)
 
 <a href="https://openreview.net/pdf?id=zFF0WRMjlp"><img src="https://img.shields.io/badge/OpenReview-Paper-A42C25.svg" alt="OpenReview"></a>
