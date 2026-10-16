@@ -195,7 +195,10 @@ def draw_figure(output_dir, metrics, same_hist, different_hist, circle, valid, l
     if metrics['different_class_pair_count']:
         ax_dist.bar(bins[:-1], different_hist / (different_hist.sum() * width), width=width, align='edge',
                     alpha=0.45, color='#dd8452', label='Different class')
-    ax_dist.set(xlim=(0, 2), xlabel='Original-space L2 distance', ylabel='Pair density', title='Alignment: pair distances')
+    ax_dist.set(xlim=(0, 2), xticks=np.arange(0, 2.01, 0.5),
+                xlabel='Original-space L2 distance', ylabel='Pair density',
+                title='Alignment: pair distances')
+    ax_dist.set_xticklabels(['0.0', '0.5', '1.0', '1.5', '2.0'])
     ax_dist.legend(fontsize=8)
 
     xy = np.linspace(-1.2, 1.2, 80)
