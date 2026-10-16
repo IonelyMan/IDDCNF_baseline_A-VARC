@@ -16,7 +16,7 @@
 python visualize_alignment_uniformity.py \
   --checkpoint VAR/local_output/ar-ckpt-best.pth \
   --vae_ckpt vae_ch160v4096z32.pth \
-  --data_path /data/binary_images --split val --depth 16 \
+  --data_path /home/linux/7T/lzw/datasets/IDDCNF_datasets/imb_android --split test --depth 16 \
   --batch_size 1 --device cuda \
   --output_dir results/au/var_d16_best_val \
   --align_alpha 2 --uniform_t 2
