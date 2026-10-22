@@ -244,7 +244,8 @@ def draw_figure(output_dir, metrics, same_hist, different_hist, circle, valid, l
                     for collection in original_contour.collections:
                         collection.remove()
                 top.set_facecolor(background)
-                for class_id, color in ((0, '#2e7d32'), (1, '#c84e2f')):
+                # Draw malicious first so the transparent benign KDE is on top.
+                for class_id, color in ((1, '#c84e2f'), (0, '#2e7d32')):
                     class_points = points[point_labels == class_id]
                     if not len(class_points):
                         continue
