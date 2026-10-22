@@ -238,34 +238,23 @@ def draw_figure(output_dir, metrics, same_hist, different_hist, circle, valid, l
                           if hasattr(original_contour, 'get_facecolors') else
                           original_contour.collections[0].get_facecolor()[0].copy())
             if column == 1:
-                # Preserve the total KDE contour boundaries. Class KDEs only
-                # decide the hue at each grid location, weighted by class size.
-                levels = original_contour.levels
                 if hasattr(original_contour, 'remove'):
                     original_contour.remove()
                 else:
                     for collection in original_contour.collections:
                         collection.remove()
                 top.set_facecolor(background)
-                contributions = []
-                for class_id in (0, 1):
-                    class_points = points[point_labels == class_id]
-                    if len(class_points):
-                        contribution = (_circle_density(class_points, grid)
-                                        * len(class_points) / len(points))
-                    else:
-                        contribution = np.zeros(len(grid))
-                    contributions.append(contribution.reshape(xx.shape))
                 for class_id, color in ((0, '#2e7d32'), (1, '#c84e2f')):
-                    if not np.any(point_labels == class_id):
+                    class_points = points[point_labels == class_id]
+                    if not len(class_points):
                         continue
-                    dominant = contributions[class_id] >= contributions[1 - class_id]
-                    if not np.any(dominant):
-                        continue
-                    class_density = np.ma.masked_where(~dominant, density)
-                    contour = top.contourf(xx, yy, class_density, levels=levels, cmap='YlGnBu')
-                    _recolor_circle_contour(contour, background, color,
-                                            peak=float(class_density.max()))
+                    # Each class has its own KDE scale; transparency reveals
+                    # overlap without making the minority class disappear.
+                    class_density = _circle_density(class_points, grid).reshape(xx.shape)
+                    shades = ListedColormap([
+                        to_rgba(color, alpha) for alpha in np.linspace(0, 0.85, 12)
+                    ])
+                    top.contourf(xx, yy, class_density, levels=12, cmap=shades, zorder=1)
             else:
                 _recolor_circle_contour(original_contour, background,
                                         '#2e7d32' if column == 2 else '#c84e2f')
