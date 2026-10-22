@@ -9,6 +9,7 @@ import matplotlib
 
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+from matplotlib.colors import ListedColormap, to_rgba
 import numpy as np
 from scipy.spatial.distance import cdist
 from scipy.special import logsumexp
@@ -182,6 +183,19 @@ def _angle_density(angles, grid, kappa=8.0, chunk_size=256):
     return result / (len(angles) * 2 * math.pi * np.i0(kappa))
 
 
+def _recolor_circle_contour(contour, background, target, peak=None):
+    """Keep contour levels and the original pale background while changing hue."""
+    if peak is None:
+        blend = np.linspace(0, 1, len(contour.levels) - 1)
+    else:
+        midpoints = (contour.levels[:-1] + contour.levels[1:]) / 2
+        blend = np.clip(midpoints / peak, 0, 1)
+        blend[0] = 0
+    colors = (1 - blend[:, None]) * background + blend[:, None] * np.asarray(to_rgba(target))
+    contour.set_cmap(ListedColormap(colors))
+    contour.changed()
+
+
 def draw_figure(output_dir, metrics, same_hist, different_hist, circle, valid, labels, model_name, representation, dimension):
     fig = plt.figure(figsize=(15, 5), constrained_layout=True)
     grid_spec = fig.add_gridspec(2, 4, height_ratios=[3, 1], width_ratios=[1.3, 1, 1, 1])
@@ -212,11 +226,49 @@ def draw_figure(output_dir, metrics, same_hist, different_hist, circle, valid, l
         ('Malicious (1)', labels == 1),
     ), start=1):
         points = circle[selection & valid]
+        point_labels = labels[selection & valid]
         top = fig.add_subplot(grid_spec[0, column])
         top.set_title(f'{title} (n={int(np.count_nonzero(selection))})', fontsize=10)
         if len(points):
             density = _circle_density(points, grid).reshape(xx.shape)
-            top.contourf(xx, yy, density, levels=12, cmap='YlGnBu')
+            original_contour = top.contourf(xx, yy, density, levels=12, cmap='YlGnBu')
+            # Matplotlib exposes contour face colors on the set in newer
+            # versions and on its collections in older versions.
+            background = (original_contour.get_facecolors()[0].copy()
+                          if hasattr(original_contour, 'get_facecolors') else
+                          original_contour.collections[0].get_facecolor()[0].copy())
+            if column == 1:
+                # Preserve the total KDE contour boundaries. Class KDEs only
+                # decide the hue at each grid location, weighted by class size.
+                levels = original_contour.levels
+                if hasattr(original_contour, 'remove'):
+                    original_contour.remove()
+                else:
+                    for collection in original_contour.collections:
+                        collection.remove()
+                top.set_facecolor(background)
+                contributions = []
+                for class_id in (0, 1):
+                    class_points = points[point_labels == class_id]
+                    if len(class_points):
+                        contribution = (_circle_density(class_points, grid)
+                                        * len(class_points) / len(points))
+                    else:
+                        contribution = np.zeros(len(grid))
+                    contributions.append(contribution.reshape(xx.shape))
+                for class_id, color in ((0, '#2e7d32'), (1, '#c84e2f')):
+                    if not np.any(point_labels == class_id):
+                        continue
+                    dominant = contributions[class_id] >= contributions[1 - class_id]
+                    if not np.any(dominant):
+                        continue
+                    class_density = np.ma.masked_where(~dominant, density)
+                    contour = top.contourf(xx, yy, class_density, levels=levels, cmap='YlGnBu')
+                    _recolor_circle_contour(contour, background, color,
+                                            peak=float(class_density.max()))
+            else:
+                _recolor_circle_contour(original_contour, background,
+                                        '#2e7d32' if column == 2 else '#c84e2f')
         else:
             top.text(0.5, 0.5, 'No valid points', transform=top.transAxes, ha='center', va='center')
         top.plot(np.cos(phi), np.sin(phi), color='gray', lw=0.8)
