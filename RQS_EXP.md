@@ -11,14 +11,14 @@
 ## 2. 运行
 
 在 Linux/Python 3.10 环境中，先按 [REPRODUCE_BINARY.md](REPRODUCE_BINARY.md) 安装依赖并签出 `VAR` 子模块。`requirements.txt` 已增加 SciPy。准备训练后的**二分类** VAR checkpoint、对应 VQ-VAE 权重和 `val/benign`、`val/mal` 图片目录。**默认对指定 split 的全部图片计算和绘图**，无需提供样本清单，也不会默认随机抽样。完整样本 ID 和标签仍自动写入输出的 `sample_manifest.csv`，供核查。
-
+# 主程序
 ```bash
 python visualize_alignment_uniformity.py \
   --checkpoint VAR/local_output/ar-ckpt-best.pth \
   --vae_ckpt vae_ch160v4096z32.pth \
   --data_path /home/linux/7T/lzw/datasets/IDDCNF_datasets/imb_android --split test --depth 16 \
   --batch_size 1 --device cuda \
-  --output_dir results/au/var_d16_best_val \
+  --output_dir results/au/var_d16_best_test \
   --align_alpha 2 --uniform_t 2
 ```
 
